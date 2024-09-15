@@ -1,0 +1,10 @@
+<h1>Hello, Rails!</h1>
+<h2>This is the articles index view</h2>
+
+<ul>
+    <% @articles.each do |article| %>
+    <li>
+        <%= article.title %>
+    </li>
+    <% end %>
+</ul>
