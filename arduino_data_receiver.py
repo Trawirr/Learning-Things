@@ -6,6 +6,8 @@ class ArduinoReceiver:
         self.devices = []
         self.selected_device = None
         self.connection = None
+        self.listen_thread = None
+        self.queue = queue.Queue()
 
     def fetch_available_devices(self) -> None:
         self.devices = serial.tools.list_ports.comports()
@@ -26,14 +28,36 @@ class ArduinoReceiver:
             print("Select device: ", end="")
             choice = int(input())
 
-        self.select_device = self.devices[choice].device
-        print(f"Selected device: {self.select_device}")
+        self.selected_device = self.devices[choice].device
+        print(f"Selected device: {self.selected_device}")
 
     def connect(self, baudrate=115200, timeout=0.1) -> None:
         self.connection = serial.Serial(self.selected_device, baudrate=baudrate, timeout=timeout)
         if self.connection:
-            print(f"Connected to {self.select_device}")
+            print(f"Connected to {self.selected_device}")
+            print(self.connection)
+
+    def listen(self) -> None:
+        message = b''
+        while True:
+            data = self.connection.read()
+            # message ended
+            if (data == b'\n'):
+                self.queue.put(message.decode('utf-8').strip().upper())
+                message = b''
+            elif data:
+                message += data
+
+    def start_listening(self) -> None:
+        self.listen_thread = threading.Thread(target=self.listen, args=())
+        self.listen_thread.daemon = True
+        self.listen_thread.start()
+        print("Listening...")
+
+        while True:
+            pass
 
 ard_receiver = ArduinoReceiver()
 ard_receiver.select_device()
 ard_receiver.connect()
+ard_receiver.start_listening()
