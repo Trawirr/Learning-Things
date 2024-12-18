@@ -51,16 +51,32 @@ class ArduinoManager:
         # controllers
         self._arduino_bluetooth_receiver = ArduinoBluetoothReceiver()
         self._midi_controller = MidiController()
+
+        self._current_channel = 0
+        self._current_sound = 0
         
         self._velocity_history = []
         self._history_length = 50
-        self._activity_threshold = 10
+        self._activity_threshold = 2
         self._gesture_prob_threshold = 0.75
         self._gesture_cooldown = 2# seconds
         self._gesture_last_time = None
 
+        self._gestures_order = []
         self._gestures_data = None
         self._knn = None
+
+        self._lfo_threshold = 0
+        self._lfo_value = 0
+        self._lfo_range = [0, 127]
+
+        self._octave_threshold = 0
+        self._octave_value = 64
+        self._octave_range = (0, 127)
+
+        self._notes = [
+            [65, 68, 72, 75, 79]
+        ]
 
     def load_gestures_data(self, path):
         self._gestures_data = pd.read_csv(path)
@@ -75,12 +91,15 @@ class ArduinoManager:
         print(f"{self._gestures=}")
 
     def get_gesture(self):
-        random_gesture = random.choice(self._gestures)
+        if not self._gestures_order:
+            self._gestures_order = self._gestures.copy()
+            random.shuffle(self._gestures_order)
+        random_gesture = self._gestures_order.pop(0)
         pause = input(f"Make a gesture - {random_gesture}")
         if pause == '0':
             return None
         angles = self.get_knn_data()
-        # print(f"{angles=}")
+        print(f"{angles=}")
         return (*angles, random_gesture)
 
     def train(self, csv_path):
@@ -96,23 +115,43 @@ class ArduinoManager:
         
         keys = training_data[0].keys()
 
-        with open(csv_path, 'w', newline='') as output_file:
+        try:
+            with open(csv_path, 'r') as f:
+                file_exists = True
+        except FileNotFoundError:
+            file_exists = False
+
+        with open(csv_path, 'a', newline='') as output_file:
             dict_writer = csv.DictWriter(output_file, keys)
-            dict_writer.writeheader()
+            if not file_exists:
+                dict_writer.writeheader()
             dict_writer.writerows(training_data)
 
     def start_midi(self, name='Gestomat'):
         self._midi_controller.connect_to_midi(name)
-        self._midi_controller.send('note_on', channel=0, note=int(70), velocity=0)
-        self._midi_controller.send('note_on', channel=1, note=int(77), velocity=0)
-        self._midi_controller.send('note_on', channel=2, note=int(84), velocity=0)
-        self._midi_controller.send('note_on', channel=3, note=int(63), velocity=0)
+        self._midi_controller.send('note_on', channel=0, note=int(65), velocity=1) # F4
+        self._midi_controller.send('note_on', channel=1, note=int(68), velocity=1) # As
+        self._midi_controller.send('note_on', channel=2, note=int(72), velocity=1) # C5
+        self._midi_controller.send('note_on', channel=3, note=int(75), velocity=1) # Es
+        self._midi_controller.send('note_on', channel=4, note=int(79), velocity=1) # G5
+        
+        # self._midi_controller.send('note_on', channel=0, note=int(29), velocity=1) # F1
+        # self._midi_controller.send('note_on', channel=1, note=int(32), velocity=1) # As
+        # self._midi_controller.send('note_on', channel=2, note=int(36), velocity=1) # C2
+        # self._midi_controller.send('note_on', channel=3, note=int(39), velocity=1) # Es
+        # self._midi_controller.send('note_on', channel=4, note=int(43), velocity=1) # G2
+        
+        # self._midi_controller.send('note_on', channel=0, note=int(70), velocity=50) # B4 HEs?
+        # self._midi_controller.send('note_on', channel=1, note=int(77), velocity=50) # F5
+        # self._midi_controller.send('note_on', channel=2, note=int(84), velocity=50) # C6
+        # self._midi_controller.send('note_on', channel=3, note=int(63), velocity=50) # Es
+        # self._midi_controller.send('note_on', channel=4, note=int(56), velocity=50) # As
 
     def start_bluetooth(self, port='COM7', baudrate=9600):
         self._arduino_bluetooth_receiver.establish_bluetooth(port, baudrate)
         self._arduino_bluetooth_receiver.start_listening()
 
-    # base X, base Y base Z, base v X, base v Y, base v Z, [for every finger:] angle, velocity
+    # base X, base Y base Z, base v X, base v Y, base v Z, [for every finger:] angle
     def get_last_message_split(self):
         msg = self._arduino_bluetooth_receiver._last_message
         msg = msg.strip()
@@ -124,56 +163,117 @@ class ArduinoManager:
         base_v = data[3:6]
         print(f"Base: {base}\nBase v: {base_v}")
         for i in range(6):
-            angle, v = data[6+2*i:8+2*i]
-            print(f"Finger {i+1}: {angle=}, {v=}")
+            angle = data[6+i]
+            print(f"Finger {i+1}: {angle=}")
         print()
+
+    def split_speed(self):
+        data = self.get_last_message_split()
+        base = data[:3]
+        v = sum(bv ** 2 for bv in base) ** 0.5 - 9.81
+        print(f"{v=}")
 
     # data for knn
     def get_knn_data(self):
         data = self.get_last_message_split()
-        knn_data = data[8::2]
+        knn_data = data[6:]
         return knn_data
     
     def update_history(self):
         data = self.get_last_message_split()
-        velocities = [data[3:6]]
+        velocities = [] #data[3:6]
         for i in range(6):
-            velocities.append(data[7 + i * 2])
+            # velocities.append(abs(data[7 + i * 2] - 9.81))
+            velocities.append(data[6:])
+            # TU JAKOS ZMIENIC
         if len(self._velocity_history) >= self._history_length:
             self._velocity_history.pop(0)
         self._velocity_history.append(velocities)
 
     def detect_low_activity(self):
+        # print(f"{self._velocity_history=}")
+        # print(f"{np.array(self._velocity_history).flatten()=}")
         all_velocities = np.array(self._velocity_history).flatten()
         activity = all_velocities.mean()
+        # activity = np.var(all_velocities)
+        print(f"{activity=}")
         return activity <= self._activity_threshold
     
     # detect with knn and do stuff
     def run_gesture(self):
-        print(self._knn.predict([self.get_knn_data()]), self._knn.predict_proba([self.get_knn_data()]))
+        if self._knn.predict_proba([self.get_knn_data()]).max() >= self._gesture_prob_threshold:
+            gesture = self._knn.predict([self.get_knn_data()])
+
+            # zmiana dzwięków
+            if gesture == 'gesture1':
+                for i in range(5):
+                    self._midi_controller.send('note_off', channel=i + self._current_channel, note=self._notes[self._current_sound][i], velocity=0)
+                self._current_channel = 0
+                self._current_sound = 0
+                for i in range(5):
+                    self._midi_controller.send('note_on', channel=i + self._current_channel, note=self._notes[self._current_sound][i], velocity=1)
+            elif gesture == 'gesture2':
+                pass
+            elif gesture == 'gesture3':
+                pass
+            elif gesture == 'gesture4':
+                pass
+            elif gesture == 'gesture5':
+                pass
+            elif gesture == 'gesture6':
+                pass
+            elif gesture == 'gesture7':
+                pass
+            elif gesture == 'gesture8':
+                pass
+            elif gesture == 'gesture9':
+                pass
+            elif gesture == 'gesture10':
+                pass
     
     def play_sounds(self):
         data = self.get_last_message_split()
-        angles = data[1::2]
-        diffs = data[::2]
-        base = 60
-        octaves = [-7, 0, 7, 14]#[-14, -7, 0, 7, 14]
-        print(f"{diffs=}, {len(diffs)=}")
+        base_vs = data[3:6]
+        angles = data[6:]
+        # base = 60
+        # octaves = [-7, 0, 7, 14]#[-14, -7, 0, 7, 14]
         print(f"{angles=}, {len(angles)=}")
-    
+        print(f"{base_vs=}")
 
-        if len(angles) >= 4:
-            for i in range(4):
-                if angles[i+2] > 30:
-                    self._midi_controller.send('control_change', channel=i, value=50)#int(min(angles[i+2], 127)))
-                    self._midi_controller.send('pitchwheel', channel=i, pitch=int(min(angles[i+2]*10, 8000)))
-                else :
+        # efekty
+        if abs(base_vs[0]) >= self._lfo_threshold:
+            self._lfo_value += base_vs[0]
+            self._lfo_value = min(max(self._lfo_value, self._lfo_range[0]), self._lfo_range[1])
+            self._midi_controller.send('control_change', channel=9, control=50, value=int(self._lfo_value))
+
+        if abs(base_vs[2]) >= self._octave_threshold:
+            self._octave_value += base_vs[2]
+            self._octave_value = min(max(self._octave_value, self._octave_range[0]), self._octave_range[1])
+            self._midi_controller.send('control_change', channel=9, control=51, value=int(self._octave_value))
+
+        print(f"{int(self._lfo_value)=}, {int(self._octave_value)=}")
+
+        # if base_vs[2] >= self._effect_threshold:
+        #     self._midi_controller.send('control_change', channel=9, control=50, value=base_vs[2] * 10)
+        # elif base_vs[2] < self._effect_threshold:
+        #     self._midi_controller.send('control_change', channel=9, control=50, value=base_vs[2] * 10)
+        # else:
+        #     self._midi_controller.send('control_change', channel=9, control=50, value=0)
+    
+        # dzwięki palców
+        if len(angles) >= 5:
+            for i in range(5):
+                if angles[i] > 30:
+                    self._midi_controller.send('control_change', channel=i, value=int(min(angles[i], 127)))
+                    # self._midi_controller.send('pitchwheel', channel=i, pitch=int(min(angles[i+2]*10, 8000)))
+                else:
                     self._midi_controller.send('control_change', channel=i, value=0)
 
     def turn_midi_off(self):
         for ch in range(5):
             for i in range(128):
-                self._midi_controller.send('note_off', note=i, channel=ch, velocity=0)
+                print(f"note off, channel={ch}")
+                self._midi_controller.send('note_off', channel=ch, note=i, velocity=0)
 
     def init_plot(self, rows: int, cols: int, x_lims: list[int] = [0, 100], y_lims: list[int] = [-360, 360]):
         self.fig, self.axes = plt.subplots(rows, cols, figsize=(10, 8))
@@ -234,19 +334,27 @@ if __name__ == "__main__":
     try:
         arduino_manager = ArduinoManager()
         arduino_manager.start_bluetooth()
-        arduino_manager.load_gestures_data(r'C:\Users\gtraw\OneDrive\Pulpit\Projekty_Github_CV\LearningThings\Arduino\gesture_data.csv')
+        # arduino_manager.load_gestures_data(r'C:\Users\gtraw\OneDrive\Pulpit\Projekty_Github_CV\LearningThings\Arduino\gesture_data_final.csv')
+        # time.sleep(2)
+        arduino_manager.start_midi("Gestomat")
+        arduino_manager.init_plot(11, 1)
+
+        # LEARNING
         time.sleep(2)
-        # arduino_manager.start_midi("Gestomat")
-        # arduino_manager.init_plot(6, 2)
-        # arduino_manager.load_gestures('gestures.txt')
-        # arduino_manager.train('gesture_data2.csv')
+        # arduino_manager.load_gestures_names('gestures.txt')
+        # arduino_manager.train('gesture_data_final.csv')
         while True:
-            arduino_manager.run_gesture()
-            # arduino_manager.split_more()
+        #     # arduino_manager.update_history()
+        #     # print(f"low activity: {arduino_manager.detect_low_activity()}")
+            # arduino_manager.run_gesture()
+            # arduino_manager.split_speed()
             # arduino_manager.plot_all_axes()
-            # print(arduino_manager.get_last_message_split())
+            print(arduino_manager.get_last_message_split()[:6])
             # arduino_manager.play_sounds()
-            time.sleep(1)
-    except Exception as e:
-        print(f"Exception: {e}")
+            time.sleep(0.05)
+    except KeyboardInterrupt:
         arduino_manager.turn_midi_off()
+        print(f"--- KeyboardInterrupt ---")
+    except Exception as e:
+        # arduino_manager.turn_midi_off()
+        print(f"Exception: {e}")
