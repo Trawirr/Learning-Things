@@ -1,6 +1,1 @@
-Subjects:
-
-- Python
-- Arduino
-- Ruby / Ruby on Rails
-- Processing
+Basic blog web app

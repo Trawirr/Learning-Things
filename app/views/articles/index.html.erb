@@ -1,0 +1,12 @@
+<h1>Hello, Rails!</h1>
+<h2>This is the articles index view</h2>
+
+<ul>
+    <% @articles.each do |article| %>
+    <li>
+        <%= link_to article.title, article %>
+    </li>
+    <% end %>
+</ul>
+
+<%= link_to "New Article", new_article_path %>
